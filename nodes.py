@@ -28,6 +28,8 @@ import comfy.clip_vision
 import comfy.model_management
 from comfy.cli_args import args
 
+from comfy.dynamic_prompt import process_dynamic_prompt, is_dynamic_prompt_changed, validate_dynamic_prompt
+
 import importlib
 
 import folder_paths
@@ -44,16 +46,30 @@ MAX_RESOLUTION=8192
 class CLIPTextEncode:
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": {"text": ("STRING", {"multiline": True}), "clip": ("CLIP", )}}
+        return {"required": {
+            "text": ("STRING", {"multiline": True}),
+            "clip": ("CLIP", )
+        }}
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "encode"
 
     CATEGORY = "conditioning"
 
     def encode(self, clip, text):
+        text = process_dynamic_prompt(text)
         tokens = clip.tokenize(text)
         cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
         return ([[cond, {"pooled_output": pooled}]], )
+
+    @classmethod
+    def IS_CHANGED(s, clip, text):
+        # Assume that if the text contains a dynamic prompt, it is always changed.
+        return is_dynamic_prompt_changed(text)
+    
+    # @classmethod
+    # def VALIDATE_INPUTS(s, clip, text):
+    #     return validate_dynamic_prompt(text)
+
 
 class ConditioningCombine:
     @classmethod
@@ -362,6 +378,14 @@ class SaveLatent:
                     metadata[x] = json.dumps(extra_pnginfo[x])
 
         file = f"{filename}_{counter:05}_.latent"
+
+        results = list()
+        results.append({
+            "filename": file,
+            "subfolder": subfolder,
+            "type": "output"
+        })
+
         file = os.path.join(full_output_folder, file)
 
         output = {}
@@ -369,7 +393,7 @@ class SaveLatent:
         output["latent_format_version_0"] = torch.tensor([])
 
         comfy.utils.save_torch_file(output, file, metadata=metadata)
-        return {}
+        return { "ui": { "latents": results } }
 
 
 class LoadLatent:
@@ -833,6 +857,7 @@ class GLIGENTextBoxApply:
 
     def append(self, conditioning_to, clip, gligen_textbox_model, text, width, height, x, y):
         c = []
+        text = process_dynamic_prompt(text)
         cond, cond_pooled = clip.encode_from_tokens(clip.tokenize(text), return_pooled=True)
         for t in conditioning_to:
             n = [t[0], t[1].copy()]
@@ -844,6 +869,14 @@ class GLIGENTextBoxApply:
             n[1]['gligen'] = ("position", gligen_textbox_model, prev + position_params)
             c.append(n)
         return (c, )
+
+    @classmethod
+    def IS_CHANGED(s, conditioning_to, clip, gligen_textbox_model, text, width, height, x, y):
+        return is_dynamic_prompt_changed(text)
+
+    # @classmethod
+    # def VALIDATE_INPUTS(s, conditioning_to, clip, gligen_textbox_model, text, width, height, x, y):
+    #     return validate_dynamic_prompt(text)
 
 class EmptyLatentImage:
     def __init__(self, device="cpu"):
