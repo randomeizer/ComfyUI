@@ -1,6 +1,7 @@
 import comfy.utils
 import folder_paths
 import torch
+import logging
 
 def load_hypernetwork_patch(path, strength):
     sd = comfy.utils.load_torch_file(path, safe_load=True)
@@ -19,10 +20,11 @@ def load_hypernetwork_patch(path, strength):
         "tanh": torch.nn.Tanh,
         "sigmoid": torch.nn.Sigmoid,
         "softsign": torch.nn.Softsign,
+        "mish": torch.nn.Mish,
     }
 
     if activation_func not in valid_activation:
-        print("Unsupported Hypernetwork format, if you report it I might implement it.", path, " ", activation_func, is_layer_norm, use_dropout, activate_output, last_layer_dropout)
+        logging.error("Unsupported Hypernetwork format, if you report it I might implement it. {}   {} {} {} {} {}".format(path, activation_func, is_layer_norm, use_dropout, activate_output, last_layer_dropout))
         return None
 
     out = {}
@@ -42,7 +44,8 @@ def load_hypernetwork_patch(path, strength):
             linears = list(map(lambda a: a[:-len(".weight")], linears))
             layers = []
 
-            for i in range(len(linears)):
+            i = 0
+            while i < len(linears):
                 lin_name = linears[i]
                 last_layer = (i == (len(linears) - 1))
                 penultimate_layer = (i == (len(linears) - 2))
@@ -56,10 +59,17 @@ def load_hypernetwork_patch(path, strength):
                     if (not last_layer) or (activate_output):
                         layers.append(valid_activation[activation_func]())
                 if is_layer_norm:
-                    layers.append(torch.nn.LayerNorm(lin_weight.shape[0]))
+                    i += 1
+                    ln_name = linears[i]
+                    ln_weight = attn_weights['{}.weight'.format(ln_name)]
+                    ln_bias = attn_weights['{}.bias'.format(ln_name)]
+                    ln = torch.nn.LayerNorm(ln_weight.shape[0])
+                    ln.load_state_dict({"weight": ln_weight, "bias": ln_bias})
+                    layers.append(ln)
                 if use_dropout:
                     if (not last_layer) and (not penultimate_layer or last_layer_dropout):
                         layers.append(torch.nn.Dropout(p=0.3))
+                i += 1
 
             output.append(torch.nn.Sequential(*layers))
         out[dim] = torch.nn.ModuleList(output)
@@ -97,7 +107,7 @@ class HypernetworkLoader:
     CATEGORY = "loaders"
 
     def load_hypernetwork(self, model, hypernetwork_name, strength):
-        hypernetwork_path = folder_paths.get_full_path("hypernetworks", hypernetwork_name)
+        hypernetwork_path = folder_paths.get_full_path_or_raise("hypernetworks", hypernetwork_name)
         model_hypernetwork = model.clone()
         patch = load_hypernetwork_patch(hypernetwork_path, strength)
         if patch is not None:

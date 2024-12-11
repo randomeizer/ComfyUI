@@ -1,8 +1,9 @@
 import torch
 import comfy.model_management
 import comfy.samplers
-import math
+import comfy.utils
 import numpy as np
+import logging
 
 def prepare_noise(latent_image, seed, noise_inds=None):
     """
@@ -23,70 +24,27 @@ def prepare_noise(latent_image, seed, noise_inds=None):
     noises = torch.cat(noises, axis=0)
     return noises
 
-def prepare_mask(noise_mask, shape, device):
-    """ensures noise mask is of proper dimensions"""
-    noise_mask = torch.nn.functional.interpolate(noise_mask.reshape((-1, 1, noise_mask.shape[-2], noise_mask.shape[-1])), size=(shape[2], shape[3]), mode="bilinear")
-    noise_mask = noise_mask.round()
-    noise_mask = torch.cat([noise_mask] * shape[1], dim=1)
-    if noise_mask.shape[0] < shape[0]:
-        noise_mask = noise_mask.repeat(math.ceil(shape[0] / noise_mask.shape[0]), 1, 1, 1)[:shape[0]]
-    noise_mask = noise_mask.to(device)
-    return noise_mask
+def fix_empty_latent_channels(model, latent_image):
+    latent_channels = model.get_model_object("latent_format").latent_channels #Resize the empty latent image so it has the right number of channels
+    if latent_channels != latent_image.shape[1] and torch.count_nonzero(latent_image) == 0:
+        latent_image = comfy.utils.repeat_to_batch_size(latent_image, latent_channels, dim=1)
+    return latent_image
 
-def broadcast_cond(cond, batch, device):
-    """broadcasts conditioning to the batch size"""
-    copy = []
-    for p in cond:
-        t = p[0]
-        if t.shape[0] < batch:
-            t = torch.cat([t] * batch)
-        t = t.to(device)
-        copy += [[t] + p[1:]]
-    return copy
-
-def get_models_from_cond(cond, model_type):
-    models = []
-    for c in cond:
-        if model_type in c[1]:
-            models += [c[1][model_type]]
-    return models
-
-def load_additional_models(positive, negative, dtype):
-    """loads additional models in positive and negative conditioning"""
-    control_nets = get_models_from_cond(positive, "control") + get_models_from_cond(negative, "control")
-    gligen = get_models_from_cond(positive, "gligen") + get_models_from_cond(negative, "gligen")
-    gligen = [x[1].to(dtype) for x in gligen]
-    models = control_nets + gligen
-    comfy.model_management.load_controlnet_gpu(models)
-    return models
+def prepare_sampling(model, noise_shape, positive, negative, noise_mask):
+    logging.warning("Warning: comfy.sample.prepare_sampling isn't used anymore and can be removed")
+    return model, positive, negative, noise_mask, []
 
 def cleanup_additional_models(models):
-    """cleanup additional models that were loaded"""
-    for m in models:
-        m.cleanup()
+    logging.warning("Warning: comfy.sample.cleanup_additional_models isn't used anymore and can be removed")
 
 def sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False, noise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None):
-    device = comfy.model_management.get_torch_device()
+    sampler = comfy.samplers.KSampler(model, steps=steps, device=model.load_device, sampler=sampler_name, scheduler=scheduler, denoise=denoise, model_options=model.model_options)
 
-    if noise_mask is not None:
-        noise_mask = prepare_mask(noise_mask, noise.shape, device)
+    samples = sampler.sample(noise, positive, negative, cfg=cfg, latent_image=latent_image, start_step=start_step, last_step=last_step, force_full_denoise=force_full_denoise, denoise_mask=noise_mask, sigmas=sigmas, callback=callback, disable_pbar=disable_pbar, seed=seed)
+    samples = samples.to(comfy.model_management.intermediate_device())
+    return samples
 
-    real_model = None
-    comfy.model_management.load_model_gpu(model)
-    real_model = model.model
-
-    noise = noise.to(device)
-    latent_image = latent_image.to(device)
-
-    positive_copy = broadcast_cond(positive, noise.shape[0], device)
-    negative_copy = broadcast_cond(negative, noise.shape[0], device)
-
-    models = load_additional_models(positive, negative, model.model_dtype())
-
-    sampler = comfy.samplers.KSampler(real_model, steps=steps, device=device, sampler=sampler_name, scheduler=scheduler, denoise=denoise, model_options=model.model_options)
-
-    samples = sampler.sample(noise, positive_copy, negative_copy, cfg=cfg, latent_image=latent_image, start_step=start_step, last_step=last_step, force_full_denoise=force_full_denoise, denoise_mask=noise_mask, sigmas=sigmas, callback=callback, disable_pbar=disable_pbar, seed=seed)
-    samples = samples.cpu()
-
-    cleanup_additional_models(models)
+def sample_custom(model, noise, cfg, sampler, sigmas, positive, negative, latent_image, noise_mask=None, callback=None, disable_pbar=False, seed=None):
+    samples = comfy.samplers.sample(model, noise, positive, negative, cfg, model.load_device, sampler, sigmas, model_options=model.model_options, latent_image=latent_image, denoise_mask=noise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
+    samples = samples.to(comfy.model_management.intermediate_device())
     return samples
